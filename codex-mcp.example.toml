@@ -1,0 +1,4 @@
+# 通过 codex mcp add 注册；不把登录Token放入此文件。
+[mcp_servers.pavo-website]
+command = "/ABSOLUTE/PATH/pavo-website-mcp/.venv/bin/python"
+args = ["-m", "pavo_website_mcp.server"]

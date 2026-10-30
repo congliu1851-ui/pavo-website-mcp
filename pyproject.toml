@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pavo-website-mcp"
+version = "0.3.1"
+description = "独立直连 Pavo 官网的本地 MCP 服务"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = ["mcp==2.3.0", "httpx==0.28.1"]
+
+[project.urls]
+Repository = "https://github.com/congliu1851-ui/pavo-website-mcp"
+Issues = "https://github.com/congliu1851-ui/pavo-website-mcp/issues"
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+pavo-website-mcp = "pavo_website_mcp.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pavo_website_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/", "tests/", "ci/", "docs/工具参考.md", "docs/使用示例.md", "docs/恢复与安全.md", "docs/开发说明.md", "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "pyproject.toml", "uv.lock", "codex-mcp.example.toml", "登录Pavo.command"]

@@ -1,0 +1,35 @@
+name: 测试与构建
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python 3.12 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.11.29'
+          python-version: '3.12'
+      - name: 安装锁定依赖
+        run: uv sync --frozen --all-groups
+      - name: 全套离线与stdio测试
+        run: uv run --frozen pytest -q
+      - name: 编译与构建
+        run: |
+          uv run --frozen python -m compileall -q src
+          uv build

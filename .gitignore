@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+dist/
+*.egg-info/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+session.json
+*.sqlite3
+*.sqlite3-*
+htmlcov/
+.coverage
+build/
+# 本机联调资料及第三方官网脚本仅留本地，不公开。
+scripts/
+docs/superpowers/
+docs/剧本接口调查/
+docs/剧本只读验证/
+docs/*.json
+docs/验收报告.md
+docs/AI剧本扩展验收.md
+docs/联调素材-*.png
