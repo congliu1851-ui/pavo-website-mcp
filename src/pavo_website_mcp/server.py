@@ -15,6 +15,8 @@ from .store import OperationUnknown, Store
 from .workflow import Workflow
 from .script import Script
 from .script_assets import ScriptAssets
+from .script_storyboard import ScriptStoryboard
+from .script_media import ScriptMedia
 
 store = Store()
 client = Client(store)
@@ -22,10 +24,12 @@ pavo = Pavo(client, store)
 workflow = Workflow(pavo)
 script = Script(client, store)
 script_assets = ScriptAssets(script)
+script_storyboard = ScriptStoryboard(script)
+script_media = ScriptMedia(script)
 server = MCPServer("pavo-website", title="Pavo官网", version=__version__, log_level="WARNING", instructions="操作Pavo官网账号。先读取实时项目、模型和模板。所有写操作使用稳定operation_id，UNKNOWN禁止换号重投。首尾帧使用官网实时guide模板。生成会消耗账号额度，须有用户的模型参数及费用授权。不得把模拟测试或工具启动当成生产业务验证。")
 
 
-def tool(title, read_only=False, idempotent=False):
+def tool(title, read_only=False, idempotent=False, destructive=False):
     def register(fn):
         @wraps(fn)
         def guarded(*args, **kwargs):
@@ -36,7 +40,7 @@ def tool(title, read_only=False, idempotent=False):
             except Exception as e:
                 logging.getLogger("pavo").warning("工具内部错误类型：%s", type(e).__name__)
                 raise ToolError("本地处理失败；写操作先查操作回执，不能自动重投。诊断日志仅保留错误类型。") from None
-        return server.tool(title=title, annotations=ToolAnnotations(read_only_hint=read_only, destructive_hint=False, idempotent_hint=read_only or idempotent, open_world_hint=not read_only))(guarded)
+        return server.tool(title=title, annotations=ToolAnnotations(read_only_hint=read_only, destructive_hint=destructive, idempotent_hint=read_only or idempotent, open_world_hint=not read_only))(guarded)
     return register
 
 
@@ -280,10 +284,52 @@ def pavo_script_save_asset_state(project_id: str, asset_type: str, asset_id: str
     return script_assets.save_state(project_id, asset_type, asset_id, patch, operation_id, state_id, expected_sha256)
 
 
+@tool("设置角色场景道具形象主图", idempotent=True)
+def pavo_script_set_asset_main_image(project_id: str, asset_type: str, asset_id: str, state_id: str, image_url: str, width: int, height: int, expected_sha256: str, operation_id: str, thumbnail_url: str = "") -> dict[str, Any]:
+    """将已上传的HTTPS图片设为指定状态的形象主图main_image。asset_type为character/scene/prop；须传get_assets对应states指纹与真实像素宽高，比例自动计算，thumbnail_url省略时使用原图。核归属、只读、同名状态歧义及UNKNOWN，按官网art-versions(sync_to_entity=true)保存版本并回读主图；不会触发生成。参考图使用save_asset_state；设置形象图片使用本工具。官网无CAS，避免同时在网页编辑同一状态。"""
+    return script_assets.set_main_image(project_id, asset_type, asset_id, state_id, image_url, width, height, expected_sha256, operation_id, thumbnail_url)
+
+
+@tool("设置角色四视图", idempotent=True)
+def pavo_script_set_character_four_view_image(project_id: str, asset_id: str, state_id: str, image_url: str, width: int, height: int, expected_sha256: str, operation_id: str, thumbnail_url: str = "") -> dict[str, Any]:
+    """将已上传的角色四视图设为指定状态的独立四视图图片位，原生字段为three_view_image。须提供get_assets对应states指纹及真实像素宽高；核归属、只读、同名状态及UNKNOWN，保存原生版本并回读目标图片和原有形象主图，保留描述、参考图、模型及绑定。不发起生成，不自动入素材库；官网无CAS，避免同时在网页编辑同一状态。"""
+    return script_assets.set_four_view_image(project_id, asset_id, state_id, image_url, width, height, expected_sha256, operation_id, thumbnail_url)
+
+
 @tool("读取剧本分集分镜", read_only=True)
 def pavo_script_get_storyboard(project_id: str, episode_id: str) -> dict[str, Any]:
-    """核项目归属后读取原生段落、场景、镜头及active_tasks。生成分镜需单独调用run_stage，不会自动制作图片或视频。"""
-    return script.get_storyboard(project_id, episode_id)
+    """核项目归属后读取原生段落、场景、镜头及active_tasks，附_mcp_fingerprints.storyboard和各实体指纹供编辑。生成分镜需单独调用run_stage，不会自动制作图片或视频。"""
+    return script_storyboard.get(project_id, episode_id)
+
+
+@tool("编辑分镜文字和时长", idempotent=True)
+def pavo_script_update_storyboard(project_id: str, episode_id: str, shots: list[dict], scenes: list[dict], expected_sha256: str, operation_id: str) -> dict[str, Any]:
+    """按get_storyboard的_mcp_fingerprints.storyboard核对后保存，同一次仅编辑一个片段，整集须逐段调用。shots每项含shot_id及content_rich/duration_sec；scenes每项含scene_id/content_rich，内容仅为一个本项目场景标签，细节写镜头正文。单镜时长为1至15整数，素材标签必须属于本项目。沿官网PATCH shots保存并回读文字、时长、素材引用、派生视频提示词；保护原媒体与其余字段。不生成、不付费；UNKNOWN禁止换号重投。"""
+    return script_storyboard.update(project_id, episode_id, shots, scenes, expected_sha256, operation_id)
+
+
+@tool("新增分镜片段", idempotent=True)
+def pavo_script_create_storyboard_segment(project_id: str, episode_id: str, display_order: int, expected_sha256: str, operation_id: str) -> dict[str, Any]:
+    """沿官网POST episodes/{id}/segments，仅新增指定排序的片段，不复制或删除原镜头。须最新storyboard指纹，回读返回新增对象、官网默认场景镜头及新指纹；保护既有顺序和媒体。不自动生成。拆段应先复制保存并核验，再明确删除已迁移旧镜。"""
+    return script_storyboard.create(project_id, episode_id, display_order, expected_sha256, operation_id)
+
+
+@tool("新增片段内分镜镜头", idempotent=True)
+def pavo_script_create_storyboard_shot(project_id: str, episode_id: str, segment_id: str, display_order: int, expected_sha256: str, operation_id: str) -> dict[str, Any]:
+    """核本项目分集片段归属及最新storyboard指纹，按官网POST segments/{id}/shots新增镜头。返回完整回读及新指纹，不自动填正文、不移动旧镜、不生成媒体。"""
+    return script_storyboard.create(project_id, episode_id, display_order, expected_sha256, operation_id, segment_id)
+
+
+@tool("删除已迁移分镜镜头", idempotent=True, destructive=True)
+def pavo_script_delete_storyboard_shot(project_id: str, episode_id: str, shot_id: str, expected_sha256: str, operation_id: str) -> dict[str, Any]:
+    """明确删除指定镜头，只用于已授权的分镜整理；拆段先完成新段复制保存与核验，再调用本工具。核最新storyboard指纹及归属，禁止删除该场景最后一镜，保留其它内容、排序相对关系和原段媒体，不删除片段或媒体；UNKNOWN禁止换号重投。"""
+    return script_storyboard.delete_shot(project_id, episode_id, shot_id, expected_sha256, operation_id)
+
+
+@tool("删除已迁移且无媒体的旧片段", idempotent=True, destructive=True)
+def pavo_script_delete_storyboard_segment(project_id: str, episode_id: str, segment_id: str, replacement_segment_ids: list[str], expected_sha256: str, backup_dir: str, operation_id: str) -> dict[str, Any]:
+    """仅用于明确授权的分镜迁移：先完整保存并人工核完替代段台词/动作，再删除无任何已选及历史媒体的旧AI草稿段。须同集真实非空replacement_segment_ids、最新storyboard指纹、绝对backup_dir；工具先备份整集，再按官网DELETE segments/{id}删除并回读目标消失、替代及其它正文/媒体/顺序保留。不是删除最后一镜的兜底，不删除剧本/资产；UNKNOWN禁止新号重投。"""
+    return script_storyboard.delete_segment(project_id, episode_id, segment_id, replacement_segment_ids, expected_sha256, backup_dir, operation_id)
 
 
 @tool("执行指定剧本阶段", idempotent=True)
@@ -296,6 +342,48 @@ def pavo_script_run_stage(project_id: str, stage: str, operation_id: str, episod
 def pavo_script_export(project_id: str, output_dir: str, format: str = "markdown", include_storyboards: bool = False) -> dict[str, Any]:
     """读取原生剧本内容后导出到绝对目录，支持json/markdown/doc。doc为与官网同类的Word兼容HTML，不冒称DOCX。可附原生分镜数据，返回SHA和状态；不会触发生成、视频导出或覆盖不同内容的文件。"""
     return script.export(project_id, output_dir, format, include_storyboards)
+
+
+@tool("读取原生制作分集列表", read_only=True)
+def pavo_script_list_storyboard_episodes(project_id: str) -> dict[str, Any]:
+    """读取官网projects/{id}/episodes/storyboard制作分集，不把progress中的剧本草稿分集ID猜作制作分集ID。只读，不生成。"""
+    return script_media.list_episodes(project_id)
+
+
+@tool("读取短剧媒体实时模型", read_only=True)
+def pavo_script_list_media_models(scene_code: str) -> dict[str, Any]:
+    """按官网model_options查询segment_keyframe或segment_video模型与账号约束；不混用canvas类别，不生成。"""
+    return script_media.list_models(scene_code)
+
+
+@tool("读取片段媒体和状态", read_only=True)
+def pavo_script_get_segment_media(project_id: str, episode_id: str, segment_id: str) -> dict[str, Any]:
+    """核原生制作分集及片段归属，读取关键帧/视频历史、原生任务状态及选中槽位，返回_mcp_fingerprints.media。关键帧为segment级，一段多镜仍只有该段槽位。"""
+    return script_media.get(project_id, episode_id, segment_id)
+
+
+@tool("关联已上传媒体到片段", idempotent=True)
+def pavo_script_attach_segment_media(project_id: str, episode_id: str, segment_id: str, media_type: str, url: str, expected_sha256: str, operation_id: str, thumbnail_url: str = "", first_frame_url: str = "") -> dict[str, Any]:
+    """将已上传HTTPS图片/视频沿原生media/upload存历史，再select并回读槽位；image用segment_keyframe，video用segment_video且须明确first_frame_url。核最新media指纹，保护脚本文字和其它媒体。不生图、不生成视频；部分成功保持UNKNOWN，禁止换号重投。"""
+    return script_media.attach(project_id, episode_id, segment_id, media_type, url, expected_sha256, operation_id, thumbnail_url, first_frame_url)
+
+
+@tool("选择片段已有媒体", idempotent=True)
+def pavo_script_select_segment_media(project_id: str, episode_id: str, segment_id: str, media_id: str, expected_sha256: str, operation_id: str) -> dict[str, Any]:
+    """只选择该片段原生历史中的唯一media_id，核最新media指纹并回读目标槽位；禁止运行中或失败记录，保留另一槽位和所有原媒体、正文。不生成。"""
+    return script_media.select(project_id, episode_id, segment_id, media_id, expected_sha256, operation_id)
+
+
+@tool("提交单片段视频", idempotent=True)
+def pavo_script_submit_segment_video(project_id: str, episode_id: str, segment_id: str, model_code: str, resolution: str, expected_ratio: str, style: dict, expected_sha256: str, operation_id: str, regenerate: bool = False, reference_image_url: str | None = None) -> dict[str, Any]:
+    """消耗额度，须用户已授权模型参数和费用。显式模型、分辨率、style_id或custom_style_prompt、expected_ratio；比例只核项目，原生请求无独立ratio字段。核实时segment_video模型和段总时长、已选关键帧；只调用已核single_frame视频合同，保存唯一真实新task_id。不调用Pavo生图。UNKNOWN禁止重投；重生成须regenerate且旧任务为已核终态。"""
+    return script_media.submit_video(project_id, episode_id, segment_id, model_code, resolution, expected_ratio, style, expected_sha256, operation_id, regenerate, reference_image_url)
+
+
+@tool("查询短剧片段视频任务", read_only=True)
+def pavo_script_get_segment_video_task(project_id: str, episode_id: str, segment_id: str, task_id: str) -> dict[str, Any]:
+    """从本片段原生segment_video历史匹配generation_task_id查询状态，不调用画布get_task。仅已核success/failed作终态判断；未知状态、历史暂缺、运行超5分钟都不能自动重提。失败重试另用明确授权的提交工具。"""
+    return script_media.get_video_task(project_id, episode_id, segment_id, task_id)
 
 
 def main():

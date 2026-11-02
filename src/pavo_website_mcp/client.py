@@ -20,6 +20,27 @@ class APIError(RuntimeError):
         return self.status == 409 or self.code == "VERSION_CONFLICT"
 
 
+def business_error_hint(message):
+    """只输出固定类别，不把服务端可能回显的正文、URL或凭证写入工具及台账。"""
+    if not isinstance(message, str):
+        return ""
+    text = message.lower()
+    for pattern, label in (
+        (r"请求.{0,6}频繁|频率限制|rate.?limit|too many requests", "请求限流"),
+        (r"任务.{0,12}(未结束|进行中|运行中)|正在.{0,8}(执行|运行|生成|处理)|资源.{0,8}(占用|繁忙)|server busy|resource.{0,12}busy|in progress|获取.{0,6}锁.{0,6}失败", "任务占用或繁忙"),
+        (r"同一.{0,8}(片段|场景|分集)|same (segment|scene|episode)|cross.?segment|cross.?episode", "片段或归属范围约束"),
+        (r"状态.{0,8}(冲突|不允许|不正确|不合法)|版本.{0,8}(冲突|过期)|state.{0,20}(conflict|invalid|not allow)|version.{0,12}(conflict|stale)", "状态或版本冲突"),
+        (r"时长|duration", "时长校验"),
+        (r"长度.{0,10}(超|过|限)|too (long|large)|maximum length|character limit", "内容长度限制"),
+        (r"无权限|权限不足|permission denied|not authorized|forbidden", "权限限制"),
+        (r"参数.{0,8}(错误|无效|非法)|invalid (parameter|argument)|素材.{0,8}(不属于|不存在)|not found|does not exist", "参数或资源校验"),
+        (r"稍后重试|try again|temporar|系统.{0,8}(异常|错误)", "暂时性业务错误"),
+    ):
+        if re.search(pattern, text):
+            return label
+    return ""
+
+
 class Client:
     base_url = "https://api.pavo-ai.cn"
 
@@ -59,11 +80,14 @@ class Client:
             raise APIError("官网响应信封不完整，结果需要核对")
         code = str(envelope["code"])
         if code != "000000":
-            message = str(envelope.get("message", "")).lower()
+            raw_message = envelope.get("message") or envelope.get("error_message", "")
+            message = str(raw_message).lower()
             conflict = ("version" in message or "版本" in message) and any(s in message for s in ("conflict", "stale", "outdated", "冲突", "过期"))
             safe_code = code if code.isalnum() and len(code) <= 40 else "UNKNOWN"
-            raise APIError("登录失效，请重新登录" if code == "000501" else f"官网业务请求被拒绝，错误码 {safe_code}",
-                           code="VERSION_CONFLICT" if conflict else safe_code, definite=True)
+            hint = business_error_hint(raw_message)
+            detail = f"（诊断线索：{hint}，非根因确认）" if hint else ""
+            raise APIError("登录失效，请重新登录" if code == "000501" else f"官网业务请求被拒绝，HTTP {response.status_code}，错误码 {safe_code}{detail}",
+                           code="VERSION_CONFLICT" if conflict else safe_code, status=response.status_code, definite=True)
         return envelope.get("data")
 
     def import_authorization(self, authorization):

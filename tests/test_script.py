@@ -26,9 +26,11 @@ class ScriptClient:
             if self.timeout:raise TimeoutError("未知提交")
             return {"project_id": "100", "task": {"task_id": "300"}}
         if path.endswith("/styles"):return {"categories": [{"styles": [{"style_id": "style1"}]}]}
+        if path.endswith("/episodes/storyboard"):
+            return {"items": [{**e, "enterable": True, "batch_generate_selectable": True} for e in self.project['episodes']]}
         if path.endswith("/progress"):return copy.deepcopy(self.project)
         if path.endswith("/episodes/200"):return {"project_id": "100", "episode": copy.deepcopy(self.project["episodes"][0])}
-        if path.endswith("/storyboard/detail"):return {"episode_id": "200", "segments": [{"segment_id": "400", "title": "雪庭", "scenes": []}], "active_tasks": []}
+        if path.endswith("/storyboard/detail"):return {"episode_id": path.split('/')[-3], "segments": [{"segment_id": "400", "title": "雪庭", "scenes": []}], "active_tasks": []}
         if path.endswith("/assets"):return {"characters": [], "scenes": [], "props": []}
         if path.endswith("/projects"):return {"items": [], "pagination": {"page": 1}}
         raise AssertionError((method,path,payload))

@@ -94,8 +94,28 @@ class Script:
         return self.client.request("GET", ROOT + f"/projects/{identifier(str(project_id))}/assets")
 
     def get_storyboard(self, project_id, episode_id):
-        self._episode(self._project(project_id, False), episode_id)
-        return self.client.request("GET", ROOT + f"/episodes/{identifier(str(episode_id))}/storyboard/detail")
+        episode = self._storyboard_episode(self._project(project_id, False), episode_id)
+        if episode.get("enterable") is not True:
+            raise ValueError("该制作分集尚不可进入分镜详情；先读取pavo_script_list_storyboard_episodes，首次pending分镜应生成而非预读详情")
+        board = self.client.request("GET", ROOT + f"/episodes/{identifier(str(episode_id))}/storyboard/detail")
+        if not isinstance(board, dict) or str(board.get("episode_id")) != str(episode_id) or not isinstance(board.get("segments"), list):
+            raise APIError("分镜响应分集归属或结构不符")
+        return board
+
+    def _storyboard_episodes(self, project):
+        data = self.client.request("GET", ROOT + f"/projects/{identifier(str(project['project_id']))}/episodes/storyboard")
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise APIError("官网制作分集列表结构无法识别")
+        return data
+
+    def _storyboard_episode(self, project, episode_id):
+        """制作列表是分镜归属与可进入性的依据，不能拿正文标题猜ID。"""
+        episode_id = identifier(str(episode_id))
+        data = self._storyboard_episodes(project)
+        matches = [e for e in data["items"] if str(e.get("episode_id")) == episode_id]
+        if len(matches) != 1:
+            raise ValueError("分镜episode_id不属于本项目的唯一制作分集；请先读取pavo_script_list_storyboard_episodes，不按标题映射")
+        return matches[0]
 
     def _style(self, ratio, style):
         if ratio not in {"9:16", "16:9"}:
@@ -226,11 +246,21 @@ class Script:
                 raise ValueError("上传后源文件已改变，SHA或大小不符，停止生成")
             return self.import_text(text, Path(file["file_name"]).stem, ratio, style, operation_id, planned_episode_count)
 
+    @staticmethod
+    def _storyboard_preflight(read):
+        # 仅包围分镜写入前的只读调用；提交后回读不得使用此分类。
+        try:
+            return read()
+        except APIError as error:
+            raise APIError("分镜预检读取失败，未提交写请求：" + str(error),
+                           code=error.code, status=error.status, definite=True) from None
+
     def _write(self, project_id, operation_id, kind, payload, action):
         project_id = identifier(str(project_id))
         def run(rid):
             with self.store.resource_lock(canonical([self.store.account_key(), "script-project", project_id])):
-                project = self._project(project_id)
+                project = (self._storyboard_preflight(lambda: self._project(project_id))
+                           if kind.startswith("script_storyboard_") else self._project(project_id))
                 if project.get("readonly") or project.get("project_type") == "demo":
                     raise ValueError("该剧本项目为只读或官方演示，禁止写入")
                 if project.get("active_tasks"):
@@ -316,7 +346,7 @@ class Script:
             if stage == "resume_episodes" and status != "script_generating":
                 raise ValueError("当前项目不处于可恢复的分集生成阶段")
             if episode_id is not None:
-                e = self._episode(project, episode_id)
+                e = self._episode(project, episode_id) if stage == "generate_episode" else self._storyboard_episode(project, episode_id)
                 identifier(str(episode_id))
                 if stage == "generate_episode":
                     if e.get("script_status") == "generating":
@@ -329,11 +359,17 @@ class Script:
                 else:
                     if e.get("script_status") != "completed":
                         raise ValueError("生成分镜前须完成该集正文")
-                    board = self.client.request("GET", ROOT + f"/episodes/{episode_id}/storyboard/detail")
-                    if board.get("active_tasks"):
-                        raise ValueError("该集分镜仍有运行任务")
-                    if board.get("segments") and not regenerate:
-                        raise ValueError("已有分镜，再次生成需明确regenerate=true")
+                    if e.get("batch_generate_selectable") is not True:
+                        raise ValueError("官网制作列表未允许该集生成分镜，请先回读原生状态")
+                    if e.get("enterable") is True:
+                        board = self.client.request("GET", ROOT + f"/episodes/{episode_id}/storyboard/detail")
+                        if board.get("active_tasks"):
+                            raise ValueError("该集分镜仍有运行任务")
+                        if board.get("segments") and not regenerate:
+                            raise ValueError("已有分镜，再次生成需明确regenerate=true")
+                    elif not (e.get("storyboard_phase") == "pending" and e.get("shot_count") == 0):
+                        raise ValueError("该集详情不可进入且不是已核首次pending空分镜，停止生成")
+                    # 官网首次pending详情不可进入；预读detail会以067008阻断合法首次生成。
                     path = ROOT + f"/episodes/{episode_id}/storyboard/generate"
             else:
                 path = ROOT + f"/projects/{project_id}" + STAGES[stage]
@@ -367,8 +403,21 @@ class Script:
         project = self._project(project_id)
         snapshot = {"project": project, "storyboards": {}}
         if include_storyboards:
+            production = self._storyboard_episodes(project)
+            snapshot["production_episodes"] = production
+            snapshot["storyboard_episode_map"] = {}
             for e in project["episodes"]:
-                snapshot["storyboards"][str(e["episode_id"])] = self.get_storyboard(project_id, str(e["episode_id"]))
+                matches = [p for p in production["items"] if str(p.get("episode_id")) == str(e["episode_id"])]
+                by = "same_id"
+                if not matches:
+                    matches = [p for p in production["items"] if p.get("episode_no") == e.get("episode_no")]
+                    by = "unique_episode_no"
+                if len(matches) != 1:
+                    raise ValueError("正文与制作分集无法按同项目唯一episode_no对应，停止分镜导出，不按标题猜映射")
+                p = matches[0]
+                pid = str(p["episode_id"])
+                snapshot["storyboard_episode_map"][str(e["episode_id"])] = {"text_episode_id": str(e["episode_id"]), "storyboard_episode_id": pid, "episode_no": e.get("episode_no"), "matched_by": by}
+                snapshot["storyboards"][pid] = self.get_storyboard(project_id, pid) if p.get("enterable") is True else {"detail_available": False, "detail_fetched": False, "production_episode": p}
         digest = fingerprint(snapshot)
         if format == "json":
             content = json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n"
@@ -383,7 +432,8 @@ class Script:
             for e in project["episodes"]:
                 lines.extend(["", f"## 第{e.get('episode_no')}集：{e.get('title', '')}", "", str(e.get("content") or "（暂无已生成正文）"), ""])
                 if include_storyboards:
-                    lines.extend(["### 原生分镜数据", "", "```json", json.dumps(snapshot["storyboards"][str(e["episode_id"])], ensure_ascii=False, indent=2), "```", ""])
+                    mapping = snapshot["storyboard_episode_map"][str(e["episode_id"])]
+                    lines.extend(["### 原生分镜数据", "", "```json", json.dumps({"episode_mapping": mapping, "storyboard": snapshot["storyboards"][mapping["storyboard_episode_id"]]}, ensure_ascii=False, indent=2), "```", ""])
             content = "\n".join(lines)
             if format == "doc":
                 content = '\ufeff<!DOCTYPE html><html><head><meta charset="utf-8"><title>剧本导出</title></head><body><pre style="white-space:pre-wrap;font-family:宋体">' + html.escape(content) + "</pre></body></html>"

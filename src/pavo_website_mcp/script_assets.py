@@ -1,6 +1,7 @@
-"""剧本角色、场景、道具及其状态；只保存资料，不调用媒体生成接口。"""
+"""剧本角色、场景、道具的资料、状态与形象主图；不调用媒体生成接口。"""
 
 import copy
+from math import gcd
 
 from .canvas import identifier
 from .client import APIError
@@ -199,3 +200,61 @@ class ScriptAssets:
                 return {"project_id": str(project_id), "asset_type": asset_type, "asset_id": str(asset_id), "state_id": actual, "data": data}
             return self._command(resource, operation_id, "POST", ROOT + f"/projects/{project_id}/assets/{plural}/{asset_id}/states", body, normalize)
         return self.script._write(project_id, operation_id, "script_asset_save_state", payload, action)
+
+    def set_main_image(self, project_id, asset_type, asset_id, state_id, image_url, width, height, expected_sha256, operation_id, thumbnail_url=""):
+        return self._set_image(project_id, asset_type, asset_id, state_id, image_url, width, height, expected_sha256, operation_id, thumbnail_url, four_view=False)
+
+    def set_four_view_image(self, project_id, asset_id, state_id, image_url, width, height, expected_sha256, operation_id, thumbnail_url=""):
+        return self._set_image(project_id, "character", asset_id, state_id, image_url, width, height, expected_sha256, operation_id, thumbnail_url, four_view=True)
+
+    def _set_image(self, project_id, asset_type, asset_id, state_id, image_url, width, height, expected_sha256, operation_id, thumbnail_url, *, four_view):
+        self.kind(asset_type)
+        identifier(str(state_id))
+        for url in (image_url, thumbnail_url or image_url):
+            if not isinstance(url, str) or not url.startswith("https://"):
+                raise ValueError("形象图片须为已上传的HTTPS公网稳定地址")
+            safe_url(url)
+        if any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in (width, height)):
+            raise ValueError("图片宽高须为真实的正整数像素")
+        divisor = gcd(width, height)
+        image = {"url": image_url, "thumbnail_url": thumbnail_url or image_url, "width": width, "height": height,
+                 "aspect_ratio": f"{width // divisor}:{height // divisor}"}
+        field = "three_view_image" if four_view else "main_image"
+        other_field = "main_image" if four_view else "three_view_image"
+        operation_kind = "script_asset_set_four_view_image" if four_view else "script_asset_set_main_image"
+        resource_kind = "script-asset-four-view-image" if four_view else "script-asset-main-image"
+        label = "角色四视图" if four_view else "形象主图"
+        payload = {"asset_type": asset_type, "asset_id": asset_id, "state_id": state_id, "image": image, "expected_sha256": expected_sha256}
+        def action(project):
+            asset = self._asset(project_id, asset_type, asset_id)
+            state = next((s for s in asset.get("states", []) if str(s.get("state_id")) == str(state_id)), None)
+            if state is None:
+                raise ValueError("该状态不属于指定资产，不能跨资产设置图片")
+            if fingerprint(state) != expected_sha256:
+                raise ValueError("状态已改变，请回读最新状态指纹")
+            name = state.get("state_name")
+            if not isinstance(name, str) or not name.strip() or sum(str(s.get("state_name", "")).strip() == name.strip() for s in asset.get("states", [])) != 1:
+                raise ValueError("官网通过状态名称关联形象图片，状态名须非空且唯一")
+            other_image = state.get(other_field) or {}
+            empty_image = {"url": "", "thumbnail_url": "", "width": other_image.get("width") or 1024,
+                           "height": other_image.get("height") or 1024, "aspect_ratio": other_image.get("aspect_ratio") or ""}
+            body = {"project_id": str(project_id), "art_type": asset_type, "entity_id": str(asset_id), "variant": name,
+                    "task_id": "0", "ori_prompt": {"description": ""}, "polish_prompt": {"description": ""},
+                    "image": empty_image if four_view else image, "threeview": image if four_view else empty_image, "sync_to_entity": True}
+            # 官网原生上传用空地址保留另一个槽位，回读核验其未被清空。
+            resource = canonical([self.store.account_key(), resource_kind, str(project_id), asset_type, str(asset_id), str(state_id)])
+            def normalize(data):
+                try:
+                    updated = self._asset(project_id, asset_type, asset_id)
+                except (APIError, ValueError):
+                    raise APIError(f"{label}提交后回读失败，结果未知；先核对官网，禁止重新提交") from None
+                saved = next((s for s in updated.get("states", []) if str(s.get("state_id")) == str(state_id)), {})
+                if (saved.get(field) or {}).get("url") != image_url or saved.get(field + "_status") != "success":
+                    raise APIError(f"{label}尚未回读确认，先核对官网状态，禁止重新提交")
+                for key in ("description", "reference_images", "episode_nos", "model_code", "style", "style_id", "custom_style_prompt", other_field, other_field + "_status", other_field + "_trace_id"):
+                    if (saved.get(key) or None) != (state.get(key) or None):
+                        raise APIError("主图写入后其他资产资料发生变化，请核对官网，禁止重新提交")
+                return {"project_id": str(project_id), "asset_type": asset_type, "asset_id": str(asset_id), "state_id": str(state_id),
+                        "image_field": field, "image": saved[field], "verified": True, "data": data}
+            return self._command(resource, operation_id, "POST", ROOT + "/art/art-versions", body, normalize)
+        return self.script._write(project_id, operation_id, operation_kind, payload, action)

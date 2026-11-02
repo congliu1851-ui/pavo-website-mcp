@@ -24,11 +24,17 @@ def test_real_stdio_handshake_list_and_call(tmp_path):
                 "pavo_script_create_ai", "pavo_script_import_text", "pavo_script_upload_file", "pavo_script_import_file",
                 "pavo_script_update_outline", "pavo_script_update_episodes", "pavo_script_get_assets", "pavo_script_get_storyboard",
                 "pavo_script_run_stage", "pavo_script_export"}
-            script_tools.update({"pavo_script_create_asset", "pavo_script_rename_asset", "pavo_script_save_asset_state"})
+            script_tools.update({"pavo_script_create_asset", "pavo_script_rename_asset", "pavo_script_save_asset_state", "pavo_script_set_asset_main_image", "pavo_script_set_character_four_view_image"})
+            script_tools.update({"pavo_script_update_storyboard", "pavo_script_create_storyboard_segment", "pavo_script_create_storyboard_shot", "pavo_script_delete_storyboard_shot"})
+            script_tools.update({"pavo_script_delete_storyboard_segment", "pavo_script_list_storyboard_episodes",
+                "pavo_script_list_media_models", "pavo_script_get_segment_media", "pavo_script_attach_segment_media",
+                "pavo_script_select_segment_media", "pavo_script_submit_segment_video", "pavo_script_get_segment_video_task"})
             assert script_tools <= tools.keys()
             for name in ('pavo_script_import_text','pavo_script_import_file'):
                 assert 'planned_episode_count' in tools[name].input_schema['required']
             assert tools["pavo_server_status"].annotations.read_only_hint
+            assert tools["pavo_script_delete_storyboard_shot"].annotations.destructive_hint
+            assert tools["pavo_script_delete_storyboard_segment"].annotations.destructive_hint
             assert not tools["pavo_submit_task"].annotations.read_only_hint
             status = await client.call_tool("pavo_server_status", {})
             assert not status.is_error
